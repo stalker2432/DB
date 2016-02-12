@@ -1,0 +1,60 @@
+#!/bin/bash
+
+host=
+pass=
+db=
+
+mkdir -p /tmp/db
+rm -rf /tmp/db/*
+
+#Блокируем таблицы
+mysql -uroot -p$pass -e "flush tables with read lock"
+
+#Делаем бэкап базы
+innobackupex --password=$pass /tmp/db || exit -1
+#Ждем >> innobackupex: completed OK!
+#применяем лог
+cd /tmp/db/201* || exit -1
+innobackupex --password=$pass  --apply-log ./ || exit -1
+#Разблокируем таблицы
+mysql -uroot -p$pass -e "unlock tables"
+
+
+BACK_DIR=`pwd`
+
+
+ssh -l root $host "mkdir /var/lib/mysql-back" || exit -1
+rsync -avprP -e ssh $BACK_DIR/ root@$host:/var/lib/mysql-back || exit -1
+#Ждем >> total size is 1741006728  speedup is 1.00
+
+ssh -l root $host "service mysql stop && mv /var/lib/mysql /var/lib/mysql-old &&  mv /var/lib/mysql-back /var/lib/mysql && chown -R mysql.mysql /var/lib/mysql && service mysql start" || exit -1
+
+LOG_FILE=`cat $BACK_DIR/xtrabackup_binlog_info | awk '{ print $1 }'`
+LOG_POS=`cat $BACK_DIR/xtrabackup_binlog_info | awk '{ print $2 }'`
+
+mysql -p$pass -h$host -e "CHANGE MASTER TO MASTER_HOST = '$host', MASTER_USER = 'replica', MASTER_PASSWORD = '$master_pass', MASTER_LOG_FILE = '$LOG_FILE', MASTER_LOG_POS = $LOG_POS"
+
+mysql -p$pass -h$host -e "start slave" || exit -1
+
+ssh -l root $host "rm -rf /var/lib/mysql-old"
+
+
+ssh -l root $host "mkdir /var/lib/mysql-back"
+rsync -avprP -e ssh $BACK_DIR/ root@$host2:/var/lib/mysql-back
+#Ждем >> total size is 1741006728  speedup is 1.00
+
+ssh -l root $host2 "service mysql stop && mv /var/lib/mysql /var/lib/mysql-old &&  mv /var/lib/mysql-back /var/lib/mysql && chown -R mysql.mysql /var/lib/mysql && service mysql start" || exit -1
+
+LOG_FILE=`cat $BACK_DIR/xtrabackup_binlog_info | awk '{ print $1 }'`
+LOG_POS=`cat $BACK_DIR/xtrabackup_binlog_info | awk '{ print $2 }'`
+
+mysql -p$pass -h$host2 -e "CHANGE MASTER TO MASTER_HOST = '$host', MASTER_USER = 'replica', MASTER_PASSWORD = '$master_pass', MASTER_LOG_FILE = '$LOG_FILE', MASTER_LOG_POS = $LOG_POS"
+
+mysql -p$pass -h$host -e "start slave" || exit -1
+
+ssh -l root $host2 "rm -rf /var/lib/mysql-old"
+
+#in master
+pt-table-checksum --password $pass --no-check-binlog-format --databases $db --no-check-replication-filters
+
+
